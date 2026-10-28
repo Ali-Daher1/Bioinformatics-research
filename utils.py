@@ -69,17 +69,17 @@ PROFILE_STAGES = ['guide_tree', 'medoid_selection', 'embedding', 'similarity', '
 
 class Profiler:
     """Accumulates wall-clock time per stage. Disabled by default (no syncs, no timing)."""
-    def __init__(self, enabled=False, device='cpu'):
+    def __init__(self, enabled=False, devices=('cpu',)):
         self.enabled = enabled
-        self.device = str(device)
+        self.devices = {str(d) for d in ([devices] if isinstance(devices, str) else devices)}
         self.times = defaultdict(float)
         self.totals = defaultdict(float)
 
     def sync(self):
         # GPU kernels run asynchronously; wait for them so time lands in the right stage
-        if self.device.startswith('cuda'):
+        if any(d.startswith('cuda') for d in self.devices):
             torch.cuda.synchronize()
-        elif self.device.startswith('mps'):
+        if any(d.startswith('mps') for d in self.devices):
             torch.mps.synchronize()
 
     @contextmanager

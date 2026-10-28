@@ -95,6 +95,13 @@ aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --devic
 ```
 If a requested backend is unavailable, ARIES prints a warning and falls back to CPU. On macOS, if a PLM operation lacks a Metal kernel, set `PYTORCH_ENABLE_MPS_FALLBACK=1` to let those ops run on CPU.
 
+`--device` only places the PLM (embedding). Similarity, DP fill, traceback and MSA assembly run on
+`--align-device`, which defaults to `cpu`. To run them on the GPU as well:
+```
+aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device cuda
+```
+Combine with `--profile` to compare per-stage times between `--align-device cpu` and `cuda`.
+
 ## CLI Reference
 
 ```
@@ -104,7 +111,8 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
                     [-w WINDOW] [-r RECIPROCAL] [--batch BATCH]
                     [--blur BLUR] [--pad-char PAD_CHAR]
                     [--medoid-topk MEDOID_TOPK]
-                    [--maxlen MAXLEN] [--device DEVICE] [--seed SEED]
+                    [--maxlen MAXLEN] [--device DEVICE]
+                    [--align-device ALIGN_DEVICE] [--seed SEED]
                     [--profile]
 
 --input, -i            Path to a folder of input FASTA (.fasta) files (e.g. ./datasets/HOMSTRAD/inputs).
@@ -125,8 +133,10 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
                        'ln' (ceil(ln(n))), or a positive integer k. Default: ln
 --maxlen               Max sequence length to include from dataset. If set above 1022, 
                        residues will be processed via PLM tiling. Default: 1022
---device               Device for PLM/ARIES: 'auto' (cuda > mps > cpu), or an explicit
-                       'cuda', 'mps', or 'cpu'. Default: auto
+--device               Device for the PLM (embedding): 'auto' (cuda > mps > cpu), or an
+                       explicit 'cuda', 'mps', or 'cpu'. Default: auto
+--align-device         Device for similarity, DP fill, traceback and MSA assembly: 'cpu',
+                       'cuda', 'mps', or 'auto'. Independent of --device. Default: cpu
 --seed                 Random seed. Default: 123
 --profile, -p          Print time spent per stage (guide tree, medoid selection, embedding,
                        similarity, DP fill, traceback, MSA assembly) for each alignment and

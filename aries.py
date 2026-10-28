@@ -16,6 +16,8 @@ class ARIES:
         self.g = kwargs.get('blur', 3.)
         self.pad_char = kwargs.get('pad_char', 'X')
         self.prof = kwargs.get('profiler') or Profiler()
+        # device for similarity, DP fill, traceback and MSA assembly (the PLM has its own)
+        self.align_device = torch.device(kwargs.get('align_device', 'cpu'))
 
         # medoid config
         self.medoid_mode = kwargs.get('medoid_mode', 'edit')
@@ -54,6 +56,68 @@ class ARIES:
 
     def assemble_columns(self, seqs, template_length, paths, pairwise_scores, verbose=True):
         num_seqs = len(seqs)
+        if self.align_device.type == 'cpu':
+            cols = self.infer_columns_loop(seqs, template_length, paths, pairwise_scores, verbose=verbose)
+        else:
+            cols = self.infer_columns_vectorized(seqs, template_length, paths, pairwise_scores, verbose=verbose)
+
+        if verbose:
+            print(f'>>>> Centering columns')
+        for t, (col_left, col_right) in enumerate(cols):
+            left_width = max([len(s) for s in col_left])
+            right_width = max([len(s) for s in col_right])
+            col = []
+            for i in range(num_seqs):
+                pad_left = (left_width - len(col_left[i])) * '-'
+                pad_right = (right_width - len(col_right[i])) * '-'
+                col.append(pad_left + col_left[i] + col_right[i] + pad_right)
+            cols[t] = col
+        alns = [
+            ''.join([c[i] for c in cols])
+            for i in range(num_seqs)
+        ]
+        del cols
+        return alns
+
+    def infer_columns_vectorized(self, seqs, template_length, paths, pairwise_scores, verbose=True):
+        # Same result as infer_columns_loop, but each step is one masked argmax on align_device
+        if verbose:
+            print(f'>>>> Assigning columns')
+        lefts, rights = [], []
+        for i in range(len(seqs)):
+            S = pairwise_scores[i].to(self.align_device)
+            L = len(seqs[i])
+            path = torch.tensor(paths[i], device=S.device)
+            on_path = torch.zeros_like(S, dtype=torch.bool)
+            on_path[path[:, 0], path[:, 1]] = True
+            # each residue keeps its best-scoring template position on the path
+            best_t = S.masked_fill(~on_path, -float('inf')).argmax(dim=0)
+            assigned = torch.zeros_like(on_path)
+            assigned[best_t, torch.arange(L, device=S.device)] = True
+            # anchor = best-scoring residue among those assigned to each template position
+            anchor_j = S.masked_fill(~assigned, -float('inf')).argmax(dim=1)
+            best_t, anchor_j = best_t.tolist(), anchor_j.tolist()
+            left, right = defaultdict(str), defaultdict(str)
+            for j, t in enumerate(best_t):
+                if j <= anchor_j[t]:
+                    left[t] += seqs[i][j]
+                else:
+                    right[t] += seqs[i][j]
+            lefts.append(left)
+            rights.append(right)
+
+        if verbose:
+            print(f'>>>> Inferring anchors')
+        cols = []
+        for t in range(template_length):
+            col_left = [left.get(t, '') for left in lefts]
+            col_right = [right.get(t, '') for right in rights]
+            if any(col_left) or any(col_right):
+                cols.append((col_left, col_right))
+        return cols
+
+    def infer_columns_loop(self, seqs, template_length, paths, pairwise_scores, verbose=True):
+        num_seqs = len(seqs)
         edges = []
         for i in range(num_seqs):
             edges.append(torch.zeros(template_length, len(seqs[i]), dtype=int))
@@ -90,24 +154,7 @@ class ARIES:
                 continue
             else:
                 cols.append((col_left, col_right))
-
-        if verbose:
-            print(f'>>>> Centering columns')
-        for t, (col_left, col_right) in enumerate(cols):
-            left_width = max([len(s) for s in col_left])
-            right_width = max([len(s) for s in col_right])
-            col = []
-            for i in range(num_seqs):
-                pad_left = (left_width - len(col_left[i])) * '-'
-                pad_right = (right_width - len(col_right[i])) * '-'
-                col.append(pad_left + col_left[i] + col_right[i] + pad_right)
-            cols[t] = col
-        alns = [
-            ''.join([c[i] for c in cols])
-            for i in range(num_seqs)
-        ]
-        del cols
-        return alns
+        return cols
 
     def align(self, seqs, **kwargs):
         print(f'Building template')
@@ -144,10 +191,11 @@ class ARIES:
         medoid_embs = self.get_embeddings(medoid_seqs)
         emb_time = time.time() - t_emb
 
-        global_medoid_emb = medoid_embs[0]
+        # the template's device decides where similarity and DP run (pairwise.align_embeddings)
+        global_medoid_emb = medoid_embs[0].to(self.align_device)
         medoid_aln = self.build_msa(medoid_embs, medoid_seqs, global_medoid_emb)
         consensus = [s.replace('-', 'X') for s in medoid_aln]
-        consensus_emb = torch.stack(self.get_embeddings(consensus), dim=0)
+        consensus_emb = torch.stack(self.get_embeddings(consensus), dim=0).to(self.align_device)
         mask = torch.tensor([[1 if c != '-' else 0 for c in s] for s in polyX_paddings(medoid_aln, pad_char=self.pad_char, w=self.w)]).to(consensus_emb.device)
         consensus_emb = (consensus_emb * mask[:, :, None]).sum(dim=0) / mask.sum(dim=0)[:, None]
 
@@ -162,7 +210,8 @@ class ARIES:
                 return_scores=True, sim_metric=self.sim_metric,
             )
             all_paths.extend(paths)
-            all_scores.extend(scores)
+            # keep finished score matrices off the GPU; large families would not fit
+            all_scores.extend(s.cpu() for s in scores)
 
         alns = self.build_msa(None, seqs, consensus_emb, paths=all_paths, pairwise_scores=all_scores)
         aln_time = time.time() - t

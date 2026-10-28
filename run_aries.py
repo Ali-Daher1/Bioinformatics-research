@@ -150,7 +150,15 @@ def parse_args():
     p.add_argument("--maxlen", type=int, default=1022, help="Max sequence length to include from dataset. Any alignments including sequenes longer than this will be skipped. Sequences longer than 1022 will be processed via PLM tiling.")
 
     # runtime
-    p.add_argument("--device", default="auto", help="Device for PLM/ARIES: 'auto' (cuda > mps > cpu), or an explicit 'cuda', 'mps', or 'cpu'.")
+    p.add_argument("--device", default="auto", help="Device for the PLM (embedding): 'auto' (cuda > mps > cpu), or an explicit 'cuda', 'mps', or 'cpu'.")
+    p.add_argument(
+        "--align-device",
+        default="cpu",
+        help=(
+            "Device for similarity, DP fill, traceback and MSA assembly: 'cpu' (default), "
+            "'cuda', 'mps', or 'auto' (cuda > mps > cpu). Independent of --device."
+        ),
+    )
     p.add_argument("--seed", type=int, default=123, help="Random seed.")
     p.add_argument(
         "-p",
@@ -179,6 +187,7 @@ def aries(
     pad_char="X",
     medoid_topk="ln",
     device="auto",
+    align_device="cpu",
     seed=123,
     maxlen=1022,
     profile=False,
@@ -201,10 +210,13 @@ def aries(
             plm = PLMWrapper(plm).to(device)
         else:
             raise
-    profiler = Profiler(enabled=profile, device=device)
+    align_device = resolve_device(align_device)
+    print(f"Embedding device: {device} | Alignment device: {align_device}")
+    profiler = Profiler(enabled=profile, devices=(device, align_device))
     config = {
         "plm": plm,
         "profiler": profiler,
+        "align_device": align_device,
         "aligner": "aries",
         "num_hidden_states": num_hidden_states,
         "window": window,
@@ -314,6 +326,7 @@ def main():
         pad_char=args.pad_char,
         medoid_topk=args.medoid_topk,
         device=args.device,
+        align_device=args.align_device,
         seed=args.seed,
         maxlen=args.maxlen,
         profile=args.profile,
