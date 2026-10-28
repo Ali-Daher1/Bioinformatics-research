@@ -101,6 +101,7 @@ If a requested backend is unavailable, ARIES prints a warning and falls back to 
 aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device cuda
 ```
 Combine with `--profile` to compare per-stage times between `--align-device cpu` and `cuda`.
+Add `--warmup 1` so one-time GPU start-up costs are not counted in the first alignment.
 
 ## CLI Reference
 
@@ -113,7 +114,7 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
                     [--medoid-topk MEDOID_TOPK]
                     [--maxlen MAXLEN] [--device DEVICE]
                     [--align-device ALIGN_DEVICE] [--seed SEED]
-                    [--profile]
+                    [--warmup WARMUP] [--profile]
 
 --input, -i            Path to a folder of input FASTA (.fasta) files (e.g. ./datasets/HOMSTRAD/inputs).
 --output-dir, -o       Directory to write ARIES alignments (FASTA). Created if missing.
@@ -138,6 +139,9 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
 --align-device         Device for similarity, DP fill, traceback and MSA assembly: 'cpu',
                        'cuda', 'mps', or 'auto'. Independent of --device. Default: cpu
 --seed                 Random seed. Default: 123
+--warmup               Number of untimed warm-up runs before the first alignment, on up to
+                       --batch sequences of the first input file. Nothing is written,
+                       scored or profiled. Default: 0
 --profile, -p          Print time spent per stage (guide tree, medoid selection, embedding,
                        similarity, DP fill, traceback, MSA assembly) for each alignment and
                        for the whole run. GPU work is synchronized at stage boundaries.

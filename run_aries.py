@@ -1,4 +1,5 @@
 import argparse
+import glob
 import os
 from typing import List
 
@@ -9,7 +10,7 @@ from plm_wrapper import PLMWrapper
 from transformers.utils import logging as hf_logging
 from aries import ARIES
 from clustal import MSAClustalO, MSAClustalW
-from utils import set_seed, Profiler
+from utils import set_seed, Profiler, temp_dir
 
 
 def resolve_device(device):
@@ -44,6 +45,22 @@ def write_fasta(alns: List[str], ids: List[str], out_path: str):
     records = [SeqRecord(Seq(alns[i]), id=ids[i], description="") for i in range(len(ids))]
     with open(out_path, "w") as handle:
         SeqIO.write(records, handle, "fasta")
+
+
+def run_warmup(aries_aligner, profiler, item, runs, batch):
+    """Untimed ARIES runs that absorb one-time costs (CUDA init, kernel loading, allocator growth)."""
+    seqs = item[2][:max(1, batch)]
+    print("-" * 90)
+    print(f"Warmup: {runs} untimed run(s) on {len(seqs)} sequences of {item[0]}")
+    enabled, profiler.enabled = profiler.enabled, False
+    try:
+        for _ in range(runs):
+            # separate name so the warm-up guide tree is not reused as the real one
+            aries_aligner.align(seqs=seqs, msa_name="_aries_warmup")
+    finally:
+        profiler.enabled = enabled
+        for path in glob.glob(os.path.join(temp_dir, "_aries_warmup*")):
+            os.remove(path)
 
 
 def parse_args():
@@ -161,6 +178,15 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=123, help="Random seed.")
     p.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        help=(
+            "Number of untimed warm-up runs before the first alignment (default: 0). Each runs ARIES on "
+            "up to --batch sequences of the first input file; nothing is written, scored or profiled."
+        ),
+    )
+    p.add_argument(
         "-p",
         "--profile",
         action="store_true",
@@ -191,6 +217,7 @@ def aries(
     seed=123,
     maxlen=1022,
     profile=False,
+    warmup=0,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -242,6 +269,8 @@ def aries(
     aries_aligner = ARIES(**config)
 
     with torch.no_grad():
+        if warmup > 0 and len(loader.dataset) > 0:
+            run_warmup(aries_aligner, profiler, loader.dataset[0], warmup, batch)
         for i, batch in enumerate(loader):
             item = batch[0]
             msa_name = item[0]
@@ -330,6 +359,7 @@ def main():
         seed=args.seed,
         maxlen=args.maxlen,
         profile=args.profile,
+        warmup=args.warmup,
     )
 
 
