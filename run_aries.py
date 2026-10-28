@@ -173,7 +173,8 @@ def parse_args():
         default="cpu",
         help=(
             "Device for similarity, DP fill, traceback and MSA assembly: 'cpu' (default), "
-            "'cuda', 'mps', or 'auto' (cuda > mps > cpu). Independent of --device."
+            "'cuda', 'mps', or 'auto' (cuda > mps > cpu). Independent of --device. "
+            "'kernel0' is 'cuda' with DP fill and traceback as custom CUDA kernels (needs CuPy)."
         ),
     )
     p.add_argument("--seed", type=int, default=123, help="Random seed.")
@@ -237,13 +238,25 @@ def aries(
             plm = PLMWrapper(plm).to(device)
         else:
             raise
+    dtw = "torch"
+    if align_device == "kernel0":
+        # custom kernels have no CPU fallback: fail instead of silently timing something else
+        if not torch.cuda.is_available():
+            raise SystemExit("--align-device kernel0 needs a CUDA GPU.")
+        try:
+            import cupy  # noqa: F401
+        except ImportError:
+            raise SystemExit("--align-device kernel0 needs CuPy: pip install cupy-cuda12x")
+        dtw, align_device = "kernel0", "cuda"
     align_device = resolve_device(align_device)
-    print(f"Embedding device: {device} | Alignment device: {align_device}")
+    dtw_note = f" (DTW: {dtw})" if dtw != "torch" else ""
+    print(f"Embedding device: {device} | Alignment device: {align_device}{dtw_note}")
     profiler = Profiler(enabled=profile, devices=(device, align_device))
     config = {
         "plm": plm,
         "profiler": profiler,
         "align_device": align_device,
+        "dtw": dtw,
         "aligner": "aries",
         "num_hidden_states": num_hidden_states,
         "window": window,

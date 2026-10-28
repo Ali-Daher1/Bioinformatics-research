@@ -44,6 +44,7 @@ py-modules = [
   "msa_tools",
   "plm_wrapper",
   "clustal",
+  "dtw_kernels",
   "pairwise",
   "scoring",
   "utils",

@@ -101,6 +101,14 @@ If a requested backend is unavailable, ARIES prints a warning and falls back to 
 aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device cuda
 ```
 Combine with `--profile` to compare per-stage times between `--align-device cpu` and `cuda`.
+
+`--align-device kernel0` is `cuda` with the DP fill and traceback replaced by custom CUDA kernels
+(`dtw_kernels.py`, compiled at run time with CuPy); similarity and MSA assembly use the same GPU code
+as `cuda`, and the alignments are identical. It needs an NVIDIA GPU and CuPy:
+```
+pip install cupy-cuda12x
+aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device kernel0
+```
 Add `--warmup 1` so one-time GPU start-up costs are not counted in the first alignment.
 
 ## CLI Reference
@@ -137,7 +145,8 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
 --device               Device for the PLM (embedding): 'auto' (cuda > mps > cpu), or an
                        explicit 'cuda', 'mps', or 'cpu'. Default: auto
 --align-device         Device for similarity, DP fill, traceback and MSA assembly: 'cpu',
-                       'cuda', 'mps', or 'auto'. Independent of --device. Default: cpu
+                       'cuda', 'mps', or 'auto'. Independent of --device. 'kernel0' is 'cuda'
+                       with DP fill and traceback as custom CUDA kernels (needs CuPy). Default: cpu
 --seed                 Random seed. Default: 123
 --warmup               Number of untimed warm-up runs before the first alignment, on up to
                        --batch sequences of the first input file. Nothing is written,
