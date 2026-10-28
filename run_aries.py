@@ -9,7 +9,7 @@ from plm_wrapper import PLMWrapper
 from transformers.utils import logging as hf_logging
 from aries import ARIES
 from clustal import MSAClustalO, MSAClustalW
-from utils import set_seed
+from utils import set_seed, Profiler
 
 
 def resolve_device(device):
@@ -152,6 +152,15 @@ def parse_args():
     # runtime
     p.add_argument("--device", default="auto", help="Device for PLM/ARIES: 'auto' (cuda > mps > cpu), or an explicit 'cuda', 'mps', or 'cpu'.")
     p.add_argument("--seed", type=int, default=123, help="Random seed.")
+    p.add_argument(
+        "-p",
+        "--profile",
+        action="store_true",
+        help=(
+            "Print time spent per stage (guide tree, medoid selection, embedding, similarity, "
+            "DP fill, traceback, MSA assembly) for each alignment and for the whole run."
+        ),
+    )
     return p.parse_args()
 
 
@@ -172,6 +181,7 @@ def aries(
     device="auto",
     seed=123,
     maxlen=1022,
+    profile=False,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -191,8 +201,10 @@ def aries(
             plm = PLMWrapper(plm).to(device)
         else:
             raise
+    profiler = Profiler(enabled=profile, device=device)
     config = {
         "plm": plm,
+        "profiler": profiler,
         "aligner": "aries",
         "num_hidden_states": num_hidden_states,
         "window": window,
@@ -239,6 +251,7 @@ def aries(
                 clustalw_aln = clustalw_aligner.align(seqs=ungapped, aln_name=msa_name)
 
             aries_aln, runtime = aries_aligner.align(seqs=ungapped, msa_name=msa_name)
+            profiler.end_family(f"{msa_name}, {len(ungapped)} seqs", runtime[1])
 
             out_path = os.path.join(output_dir, f"{msa_name}.fasta")
             write_fasta(aries_aln, ids, out_path)
@@ -279,6 +292,10 @@ def aries(
             elif resolved_ref_dir is not None:
                 print("No reference alignment found; skipping evaluation.")
 
+    if profile:
+        print("-" * 90)
+        profiler.report_totals(f"all {len(loader)} alignments")
+
 
 def main():
     args = parse_args()
@@ -299,6 +316,7 @@ def main():
         device=args.device,
         seed=args.seed,
         maxlen=args.maxlen,
+        profile=args.profile,
     )
 
 

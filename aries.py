@@ -15,7 +15,8 @@ class ARIES:
         self.r = kwargs.get('reciprocal', 200.)
         self.g = kwargs.get('blur', 3.)
         self.pad_char = kwargs.get('pad_char', 'X')
-        
+        self.prof = kwargs.get('profiler') or Profiler()
+
         # medoid config
         self.medoid_mode = kwargs.get('medoid_mode', 'edit')
         self.topk = kwargs.get('medoid_topk', 'log')
@@ -26,13 +27,14 @@ class ARIES:
 
         aligner_tokens = kwargs.get('aligner', 'aries').split('-')
         if aligner_tokens[0] == 'aries':
-            self.aligner = DTW(batch=True)
+            self.aligner = DTW(batch=True, profiler=self.prof)
         elif aligner_tokens[0] == 'turnpen':
-            self.aligner = TurnPenaltyDTW(tau=float(aligner_tokens[1]), batch=True)
-        
+            self.aligner = TurnPenaltyDTW(tau=float(aligner_tokens[1]), batch=True, profiler=self.prof)
+
     def get_embeddings(self, seqs, return_logits=False):
         padded_seqs = polyX_paddings(seqs, pad_char=self.pad_char, w=self.w)
-        embeddings, logits = self.plm(padded_seqs, num_hidden_states=self.h, batch=self.b)
+        with self.prof.section('embedding'):
+            embeddings, logits = self.plm(padded_seqs, num_hidden_states=self.h, batch=self.b)
         if return_logits:
             return embeddings, logits
         return embeddings
@@ -47,6 +49,10 @@ class ARIES:
                 w=self.w, reciprocal=self.r, blur=self.g,
                 return_scores=True, sim_metric=self.sim_metric
             )
+        with self.prof.section('msa_assembly'):
+            return self.assemble_columns(seqs, template_length, paths, pairwise_scores, verbose=verbose)
+
+    def assemble_columns(self, seqs, template_length, paths, pairwise_scores, verbose=True):
         num_seqs = len(seqs)
         edges = []
         for i in range(num_seqs):
@@ -108,25 +114,29 @@ class ARIES:
         t = time.time()
         msa_name = kwargs['msa_name']
         if self.medoid_mode == 'dnd':
-            if self.guide_tree_tool == 'clustalo':
-                path = f'{temp_dir}/{msa_name}_clustalo.dnd'
-                if not os.path.exists(path):
-                    run_clustalo(seqs, msa_name, guidetree_only=True)
-            else:
-                path = f'{temp_dir}/{msa_name}_clustalw.dnd'
-                if not os.path.exists(path):
-                    run_clustalw(seqs, msa_name, guidetree_only=True)
-        medoids = topk_medoids(seqs, k=self.topk, mode=self.medoid_mode,
-                               guide_tree_tool=self.guide_tree_tool, **kwargs)
+            with self.prof.section('guide_tree'):
+                if self.guide_tree_tool == 'clustalo':
+                    path = f'{temp_dir}/{msa_name}_clustalo.dnd'
+                    if not os.path.exists(path):
+                        run_clustalo(seqs, msa_name, guidetree_only=True)
+                else:
+                    path = f'{temp_dir}/{msa_name}_clustalw.dnd'
+                    if not os.path.exists(path):
+                        run_clustalw(seqs, msa_name, guidetree_only=True)
+        with self.prof.section('medoid_selection'):
+            medoids = topk_medoids(seqs, k=self.topk, mode=self.medoid_mode,
+                                   guide_tree_tool=self.guide_tree_tool, **kwargs)
         if self.medoid_mode == 'dnd' and any(m >= len(seqs) for m in medoids):
             # Stale cached .dnd from a run with more sequences — regenerate.
             os.remove(path)
-            if self.guide_tree_tool == 'clustalo':
-                run_clustalo(seqs, msa_name, guidetree_only=True)
-            else:
-                run_clustalw(seqs, msa_name, guidetree_only=True)
-            medoids = topk_medoids(seqs, k=self.topk, mode=self.medoid_mode,
-                                   guide_tree_tool=self.guide_tree_tool, **kwargs)
+            with self.prof.section('guide_tree'):
+                if self.guide_tree_tool == 'clustalo':
+                    run_clustalo(seqs, msa_name, guidetree_only=True)
+                else:
+                    run_clustalw(seqs, msa_name, guidetree_only=True)
+            with self.prof.section('medoid_selection'):
+                medoids = topk_medoids(seqs, k=self.topk, mode=self.medoid_mode,
+                                       guide_tree_tool=self.guide_tree_tool, **kwargs)
         medoid_seqs = [seqs[m] for m in medoids]
 
         print(f'Embed {len(medoid_seqs)} medoid sequences with PLM')

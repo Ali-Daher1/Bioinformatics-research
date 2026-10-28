@@ -26,6 +26,7 @@ from tqdm import tqdm, trange
 from copy import deepcopy
 from pprint import pprint
 from functools import partial
+from contextlib import contextmanager
 from io import StringIO
 from datetime import datetime
 from collections import Counter
@@ -62,3 +63,64 @@ def spawn_fasta(seqs, fasta_path, maxlen=None):
     records = [SeqRecord(Seq(s if len(s) > 0 else '-' * maxlen), id=f'seq{i}', description="") for i, s in enumerate(seqs)]
     with open(fasta_path, 'w') as output_handle:
         SeqIO.write(records, output_handle, "fasta")
+
+# Stage profiling
+PROFILE_STAGES = ['guide_tree', 'medoid_selection', 'embedding', 'similarity', 'dp_fill', 'traceback', 'msa_assembly']
+
+class Profiler:
+    """Accumulates wall-clock time per stage. Disabled by default (no syncs, no timing)."""
+    def __init__(self, enabled=False, device='cpu'):
+        self.enabled = enabled
+        self.device = str(device)
+        self.times = defaultdict(float)
+        self.totals = defaultdict(float)
+
+    def sync(self):
+        # GPU kernels run asynchronously; wait for them so time lands in the right stage
+        if self.device.startswith('cuda'):
+            torch.cuda.synchronize()
+        elif self.device.startswith('mps'):
+            torch.mps.synchronize()
+
+    @contextmanager
+    def section(self, name):
+        if not self.enabled:
+            yield
+            return
+        self.sync()
+        t = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.sync()
+            self.times[name] += time.perf_counter() - t
+
+    def reset(self):
+        self.times = defaultdict(float)
+
+    def report(self, header, total, times=None):
+        times = self.times if times is None else times
+        stages = PROFILE_STAGES + [s for s in times if s not in PROFILE_STAGES]
+        other = total - sum(times.values())
+        print(f'Profile ({header}):')
+        for s in stages + ['other']:
+            t = other if s == 'other' else times.get(s, 0.0)
+            pct = 100 * t / total if total > 0 else 0.0
+            print(f'  {s:<18}{t:>10.3f}s {pct:>6.1f}%')
+        print(f'  {"total":<18}{total:>10.3f}s')
+
+    def end_family(self, header, total):
+        """Print this family's breakdown and add it to the run totals."""
+        if not self.enabled:
+            return
+        self.report(header, total)
+        for s, t in self.times.items():
+            self.totals[s] += t
+        self.totals['_total'] += total
+        self.reset()
+
+    def report_totals(self, header):
+        if not self.enabled:
+            return
+        times = {s: t for s, t in self.totals.items() if s != '_total'}
+        self.report(header, self.totals['_total'], times=times)

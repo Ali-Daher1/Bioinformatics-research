@@ -4,6 +4,7 @@ from scoring import *
 class WavefrontDP:
     def __init__(self, **kwargs):
         self.batch = kwargs.get('batch', True)
+        self.profiler = kwargs.get('profiler') or Profiler()
 
     def init_DP(self, M):
         raise NotImplementedError
@@ -26,36 +27,40 @@ class WavefrontDP:
     def align_single(self, M):
         assert isinstance(M, torch.Tensor), 'not a tensor'
         L1, L2 = M.shape
-        DP = self.init_DP(M)
-        for s in range(2, L1 + L2 + 1):
-            i_idx = torch.arange(1, min(s, L1 + 1), device=M.device)
-            j_idx = s - i_idx
-            mask = (j_idx >= 1) & (j_idx <= L2)
-            i_idx, j_idx = i_idx[mask], j_idx[mask]
-            if i_idx.numel() == 0:
-                continue
-            self.recurrence(DP, M, i_idx, j_idx)
-        return self.backtrack(DP, M, L1, L2)
+        with self.profiler.section('dp_fill'):
+            DP = self.init_DP(M)
+            for s in range(2, L1 + L2 + 1):
+                i_idx = torch.arange(1, min(s, L1 + 1), device=M.device)
+                j_idx = s - i_idx
+                mask = (j_idx >= 1) & (j_idx <= L2)
+                i_idx, j_idx = i_idx[mask], j_idx[mask]
+                if i_idx.numel() == 0:
+                    continue
+                self.recurrence(DP, M, i_idx, j_idx)
+        with self.profiler.section('traceback'):
+            return self.backtrack(DP, M, L1, L2)
     
     def align_batch(self, M):
         assert isinstance(M, list), 'not a list of sim matrices'
         L1 = torch.tensor([m.shape[0] for m in M])
         L2 = torch.tensor([m.shape[1] for m in M])
         L1_max, L2_max, num_alns = torch.max(L1).item(), torch.max(L2).item(), len(M)
-        M_pad = torch.zeros((num_alns, L1_max, L2_max), device=M[0].device)
-        for i, m in enumerate(M):
-            M_pad[i, :m.shape[0], :m.shape[1]] += m
-        DP = self.init_DP_batch(M, M_pad)
-        
-        for s in range(2, L1_max + L2_max + 1):
-            i_idx = torch.arange(1, min(s, L1_max + 1), device=M_pad.device)
-            j_idx = s - i_idx
-            mask = (j_idx >= 1) & (j_idx <= L2_max)
-            i_idx, j_idx = i_idx[mask], j_idx[mask]
-            if i_idx.numel() == 0:
-                continue
-            self.recurrence_batch(DP, M_pad, i_idx, j_idx)
-        best_scores, paths = self.backtrack_batch(DP, M_pad, L1, L2)
+        with self.profiler.section('dp_fill'):
+            M_pad = torch.zeros((num_alns, L1_max, L2_max), device=M[0].device)
+            for i, m in enumerate(M):
+                M_pad[i, :m.shape[0], :m.shape[1]] += m
+            DP = self.init_DP_batch(M, M_pad)
+
+            for s in range(2, L1_max + L2_max + 1):
+                i_idx = torch.arange(1, min(s, L1_max + 1), device=M_pad.device)
+                j_idx = s - i_idx
+                mask = (j_idx >= 1) & (j_idx <= L2_max)
+                i_idx, j_idx = i_idx[mask], j_idx[mask]
+                if i_idx.numel() == 0:
+                    continue
+                self.recurrence_batch(DP, M_pad, i_idx, j_idx)
+        with self.profiler.section('traceback'):
+            best_scores, paths = self.backtrack_batch(DP, M_pad, L1, L2)
         del M, DP, M_pad
         torch.cuda.empty_cache()
         return best_scores, paths
@@ -81,12 +86,13 @@ class WavefrontDP:
             sim_metric = l2_similarity_squared_dist
 
         device = e1.device if isinstance(e1, torch.Tensor) else None
-        if self.batch:
-            assert isinstance(e2, list) and isinstance(e1, torch.Tensor), "input 2 must be list, input 1 tensor"
-            M = [sim_metric(e1, e, w, reciprocal, blur, device=device) for e in e2]
-        else:
-            assert isinstance(e1, torch.Tensor) and isinstance(e2, torch.Tensor), "both inputs must be tensors"
-            M = sim_metric(e1, e2, w, reciprocal, blur, device=device)
+        with self.profiler.section('similarity'):
+            if self.batch:
+                assert isinstance(e2, list) and isinstance(e1, torch.Tensor), "input 2 must be list, input 1 tensor"
+                M = [sim_metric(e1, e, w, reciprocal, blur, device=device) for e in e2]
+            else:
+                assert isinstance(e1, torch.Tensor) and isinstance(e2, torch.Tensor), "both inputs must be tensors"
+                M = sim_metric(e1, e2, w, reciprocal, blur, device=device)
         if return_scores:
             return *self.align(M), M
         else:

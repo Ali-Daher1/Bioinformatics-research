@@ -105,6 +105,7 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
                     [--blur BLUR] [--pad-char PAD_CHAR]
                     [--medoid-topk MEDOID_TOPK]
                     [--maxlen MAXLEN] [--device DEVICE] [--seed SEED]
+                    [--profile]
 
 --input, -i            Path to a folder of input FASTA (.fasta) files (e.g. ./datasets/HOMSTRAD/inputs).
 --output-dir, -o       Directory to write ARIES alignments (FASTA). Created if missing.
@@ -127,4 +128,7 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
 --device               Device for PLM/ARIES: 'auto' (cuda > mps > cpu), or an explicit
                        'cuda', 'mps', or 'cpu'. Default: auto
 --seed                 Random seed. Default: 123
+--profile, -p          Print time spent per stage (guide tree, medoid selection, embedding,
+                       similarity, DP fill, traceback, MSA assembly) for each alignment and
+                       for the whole run. GPU work is synchronized at stage boundaries.
 ```
