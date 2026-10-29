@@ -174,7 +174,8 @@ def parse_args():
         help=(
             "Device for similarity, DP fill, traceback and MSA assembly: 'cpu' (default), "
             "'cuda', 'mps', or 'auto' (cuda > mps > cpu). Independent of --device. "
-            "'kernel0' is 'cuda' with DP fill and traceback as custom CUDA kernels (needs CuPy)."
+            "'kernel0' / 'kernel1' are 'cuda' with DP fill and traceback as custom CUDA kernels "
+            "(needs CuPy; kernel1 keeps the DP frontier in shared memory)."
         ),
     )
     p.add_argument("--seed", type=int, default=123, help="Random seed.")
@@ -239,15 +240,15 @@ def aries(
         else:
             raise
     dtw = "torch"
-    if align_device == "kernel0":
+    if align_device in ("kernel0", "kernel1"):
         # custom kernels have no CPU fallback: fail instead of silently timing something else
         if not torch.cuda.is_available():
-            raise SystemExit("--align-device kernel0 needs a CUDA GPU.")
+            raise SystemExit(f"--align-device {align_device} needs a CUDA GPU.")
         try:
             import cupy  # noqa: F401
         except ImportError:
-            raise SystemExit("--align-device kernel0 needs CuPy: pip install cupy-cuda12x")
-        dtw, align_device = "kernel0", "cuda"
+            raise SystemExit(f"--align-device {align_device} needs CuPy: pip install cupy-cuda12x")
+        dtw, align_device = align_device, "cuda"
     align_device = resolve_device(align_device)
     dtw_note = f" (DTW: {dtw})" if dtw != "torch" else ""
     print(f"Embedding device: {device} | Alignment device: {align_device}{dtw_note}")

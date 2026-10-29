@@ -28,9 +28,10 @@ class ARIES:
         self.sim_metric = kwargs.get('sim_metric', 'l2-gm')
 
         aligner_tokens = kwargs.get('aligner', 'aries').split('-')
-        if aligner_tokens[0] == 'aries' and kwargs.get('dtw', 'torch') == 'kernel0':
-            from dtw_kernels import CudaKernelDTW  # needs CuPy; imported only when chosen
-            self.aligner = CudaKernelDTW(batch=True, profiler=self.prof)
+        dtw = kwargs.get('dtw', 'torch')
+        if aligner_tokens[0] == 'aries' and dtw != 'torch':
+            from dtw_kernels import CudaKernelDTW, KERNELS  # needs CuPy; imported only when chosen
+            self.aligner = CudaKernelDTW(batch=True, profiler=self.prof, fill=KERNELS[dtw])
         elif aligner_tokens[0] == 'aries':
             self.aligner = DTW(batch=True, profiler=self.prof)
         elif aligner_tokens[0] == 'turnpen':

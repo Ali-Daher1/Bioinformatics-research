@@ -102,9 +102,10 @@ aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --devic
 ```
 Combine with `--profile` to compare per-stage times between `--align-device cpu` and `cuda`.
 
-`--align-device kernel0` is `cuda` with the DP fill and traceback replaced by custom CUDA kernels
-(`dtw_kernels.py`, compiled at run time with CuPy); similarity and MSA assembly use the same GPU code
-as `cuda`, and the alignments are identical. It needs an NVIDIA GPU and CuPy:
+`--align-device kernel0` and `kernel1` are `cuda` with the DP fill and traceback replaced by custom CUDA
+kernels (`dtw_kernels.py`, compiled at run time with CuPy); similarity and MSA assembly use the same GPU
+code as `cuda`, and the alignments are identical. `kernel1` keeps only the three active anti-diagonals of
+the DP table in shared memory (template length up to 4095). Both need an NVIDIA GPU and CuPy:
 ```
 pip install cupy-cuda12x
 aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device kernel0
@@ -145,8 +146,9 @@ usage: aries -i INPUT -o OUTPUT_DIR [--ref-dir REF_DIR]
 --device               Device for the PLM (embedding): 'auto' (cuda > mps > cpu), or an
                        explicit 'cuda', 'mps', or 'cpu'. Default: auto
 --align-device         Device for similarity, DP fill, traceback and MSA assembly: 'cpu',
-                       'cuda', 'mps', or 'auto'. Independent of --device. 'kernel0' is 'cuda'
-                       with DP fill and traceback as custom CUDA kernels (needs CuPy). Default: cpu
+                       'cuda', 'mps', or 'auto'. Independent of --device. 'kernel0' / 'kernel1'
+                       are 'cuda' with DP fill and traceback as custom CUDA kernels (needs CuPy;
+                       kernel1 keeps the DP frontier in shared memory). Default: cpu
 --seed                 Random seed. Default: 123
 --warmup               Number of untimed warm-up runs before the first alignment, on up to
                        --batch sequences of the first input file. Nothing is written,
