@@ -22,6 +22,9 @@ import cupy as cp
 import torch
 
 from pairwise import DTW
+from utils import Profiler
+
+_NO_PROFILE = Profiler()            # disabled: the timers below do nothing
 
 _SRC = r"""
 extern "C" __global__
@@ -142,34 +145,44 @@ def _pad(M):
     return M_pad, L1, L2, T_max, L_max
 
 
-def dtw_fill_cuda(M, threads=256):
+# With --profile, each function below fills sub-rows of its stage:
+#   *_kernel: GPU execution of the kernel only (CUDA events)
+#   dp_fill_prep: padding M and creating the buffers on the GPU (no CPU<->GPU transfer)
+#   traceback_copy: GPU -> CPU transfer of scores and paths; traceback_lists: building Python lists on the CPU
+
+def dtw_fill_cuda(M, threads=256, prof=_NO_PROFILE):
     """Version 1 fill. Returns the state dtw_traceback_cuda needs: (best, DIR, L1, L2)."""
-    M_pad, L1, L2, T_max, L_max = _pad(M)
-    B, dev = len(M), M_pad.device
-    DP = torch.full((B, T_max + 1, L_max + 1), float("-inf"), dtype=torch.float32, device=dev)
-    DP[:, 0, 0] = 0.0
-    DIR = torch.zeros((B, T_max + 1, L_max + 1), dtype=torch.uint8, device=dev)
-    _fill((B,), (threads,), (_c(M_pad), _c(DP), _c(DIR), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max)))
-    best = DP[torch.arange(B, device=dev), L1.long(), L2.long()]
+    with prof.part('dp_fill_prep'):
+        M_pad, L1, L2, T_max, L_max = _pad(M)
+        B, dev = len(M), M_pad.device
+        DP = torch.full((B, T_max + 1, L_max + 1), float("-inf"), dtype=torch.float32, device=dev)
+        DP[:, 0, 0] = 0.0
+        DIR = torch.zeros((B, T_max + 1, L_max + 1), dtype=torch.uint8, device=dev)
+    with prof.gpu_part('dp_fill_kernel'):
+        _fill((B,), (threads,), (_c(M_pad), _c(DP), _c(DIR), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max)))
+    with prof.part('dp_fill_prep'):
+        best = DP[torch.arange(B, device=dev), L1.long(), L2.long()]
     return best, DIR, L1, L2
 
 
-def dtw_fill_shared_cuda(M, threads=256):
+def dtw_fill_shared_cuda(M, threads=256, prof=_NO_PROFILE):
     """Version 2 fill (three anti-diagonals in shared memory). Same return as dtw_fill_cuda."""
-    M_pad, L1, L2, T_max, L_max = _pad(M)
-    B, dev = len(M), M_pad.device
-    shared_bytes = 3 * (T_max + 1) * 4
-    if shared_bytes > MAX_SHARED_BYTES:
-        raise ValueError(f"kernel1: template length {T_max} needs {shared_bytes} bytes of shared memory "
-                         f"(limit {MAX_SHARED_BYTES}); use --align-device kernel0 for this input")
-    DIR = torch.zeros((B, T_max + 1, L_max + 1), dtype=torch.uint8, device=dev)
-    BEST = torch.empty((B,), dtype=torch.float32, device=dev)
-    _fill_shared((B,), (threads,), (_c(M_pad), _c(DIR), _c(BEST), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max)),
-                 shared_mem=shared_bytes)
+    with prof.part('dp_fill_prep'):
+        M_pad, L1, L2, T_max, L_max = _pad(M)
+        B, dev = len(M), M_pad.device
+        shared_bytes = 3 * (T_max + 1) * 4
+        if shared_bytes > MAX_SHARED_BYTES:
+            raise ValueError(f"kernel1: template length {T_max} needs {shared_bytes} bytes of shared memory "
+                             f"(limit {MAX_SHARED_BYTES}); use --align-device kernel0 for this input")
+        DIR = torch.zeros((B, T_max + 1, L_max + 1), dtype=torch.uint8, device=dev)
+        BEST = torch.empty((B,), dtype=torch.float32, device=dev)
+    with prof.gpu_part('dp_fill_kernel'):
+        _fill_shared((B,), (threads,), (_c(M_pad), _c(DIR), _c(BEST), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max)),
+                     shared_mem=shared_bytes)
     return BEST, DIR, L1, L2
 
 
-def dtw_traceback_cuda(best, DIR, L1, L2):
+def dtw_traceback_cuda(best, DIR, L1, L2, prof=_NO_PROFILE):
     """Runs dtw_traceback; returns (best_scores, paths) like WavefrontDP.align_batch."""
     dev = DIR.device
     B, T_max, L_max = DIR.shape[0], DIR.shape[1] - 1, DIR.shape[2] - 1
@@ -177,13 +190,16 @@ def dtw_traceback_cuda(best, DIR, L1, L2):
     PATH = torch.empty((B, P_max, 2), dtype=torch.int32, device=dev)
     PLEN = torch.empty((B,), dtype=torch.int32, device=dev)
     tpb = 64
-    _trace(((B + tpb - 1) // tpb,), (tpb,),
-           (_c(DIR), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max), cp.int32(P_max), _c(PATH), _c(PLEN), cp.int32(B)))
+    with prof.gpu_part('traceback_kernel'):
+        _trace(((B + tpb - 1) // tpb,), (tpb,),
+               (_c(DIR), _c(L1), _c(L2), cp.int32(T_max), cp.int32(L_max), cp.int32(P_max), _c(PATH), _c(PLEN), cp.int32(B)))
 
     # One copy to the CPU for all sequences, then the list format that build_msa expects.
-    best = best.cpu().tolist()
-    PATH, PLEN = PATH.cpu(), PLEN.cpu().tolist()
-    paths = [list(map(tuple, PATH[b, :PLEN[b]].flip(0).tolist())) for b in range(B)]
+    with prof.part('traceback_copy'):
+        best, PATH, PLEN = best.cpu(), PATH.cpu(), PLEN.cpu()
+    with prof.part('traceback_lists'):
+        best, PLEN = best.tolist(), PLEN.tolist()
+        paths = [list(map(tuple, PATH[b, :PLEN[b]].flip(0).tolist())) for b in range(B)]
     return best, paths
 
 
@@ -212,9 +228,9 @@ class CudaKernelDTW(DTW):
 
     def align_batch(self, M):
         with self.profiler.section('dp_fill'):
-            state = self.fill(M, threads=self.threads)
+            state = self.fill(M, threads=self.threads, prof=self.profiler)
         with self.profiler.section('traceback'):
-            return dtw_traceback_cuda(*state)
+            return dtw_traceback_cuda(*state, prof=self.profiler)
 
 
 KERNELS = {'kernel0': dtw_fill_cuda, 'kernel1': dtw_fill_shared_cuda}

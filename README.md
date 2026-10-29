@@ -110,6 +110,10 @@ the DP table in shared memory (template length up to 4095). Both need an NVIDIA 
 pip install cupy-cuda12x
 aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device kernel0
 ```
+With `--profile`, the kernel modes also print sub-rows under `dp_fill` and `traceback`:
+`*_kernel` is the GPU execution of the kernel only (CUDA events, no transfers), `dp_fill_prep` is padding
+and buffer setup on the GPU, `traceback_copy` is the GPU-to-CPU transfer of paths and scores, and
+`traceback_lists` is building the Python lists. Sub-rows are already counted in their stage.
 Add `--warmup 1` so one-time GPU start-up costs are not counted in the first alignment.
 
 ## CLI Reference

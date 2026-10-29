@@ -68,12 +68,18 @@ def spawn_fasta(seqs, fasta_path, maxlen=None):
 PROFILE_STAGES = ['guide_tree', 'medoid_selection', 'embedding', 'similarity', 'dp_fill', 'traceback', 'msa_assembly']
 
 class Profiler:
-    """Accumulates wall-clock time per stage. Disabled by default (no syncs, no timing)."""
+    """Accumulates wall-clock time per stage. Disabled by default (no syncs, no timing).
+
+    Parts of a stage (sub-rows named '<stage>_<part>', e.g. 'traceback_kernel') are kept apart from the
+    stages, so they never count twice in 'other' or the total.
+    """
     def __init__(self, enabled=False, devices=('cpu',)):
         self.enabled = enabled
         self.devices = {str(d) for d in ([devices] if isinstance(devices, str) else devices)}
         self.times = defaultdict(float)
         self.totals = defaultdict(float)
+        self.parts = defaultdict(float)
+        self.part_totals = defaultdict(float)
 
     def sync(self):
         # GPU kernels run asynchronously; wait for them so time lands in the right stage
@@ -95,11 +101,43 @@ class Profiler:
             self.sync()
             self.times[name] += time.perf_counter() - t
 
+    @contextmanager
+    def part(self, name):
+        """Wall-clock time of one part of a stage (synced like section)."""
+        if not self.enabled:
+            yield
+            return
+        self.sync()
+        t = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.sync()
+            self.parts[name] += time.perf_counter() - t
+
+    @contextmanager
+    def gpu_part(self, name):
+        """GPU execution time of the work queued inside the block, measured with CUDA events
+        (kernel time only: no CPU time, no transfers)."""
+        if not self.enabled:
+            yield
+            return
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        start.record()
+        try:
+            yield
+        finally:
+            end.record()
+            end.synchronize()
+            self.parts[name] += start.elapsed_time(end) / 1e3
+
     def reset(self):
         self.times = defaultdict(float)
+        self.parts = defaultdict(float)
 
-    def report(self, header, total, times=None):
+    def report(self, header, total, times=None, parts=None):
         times = self.times if times is None else times
+        parts = self.parts if parts is None else parts
         stages = PROFILE_STAGES + [s for s in times if s not in PROFILE_STAGES]
         other = total - sum(times.values())
         print(f'Profile ({header}):')
@@ -107,6 +145,10 @@ class Profiler:
             t = other if s == 'other' else times.get(s, 0.0)
             pct = 100 * t / total if total > 0 else 0.0
             print(f'  {s:<18}{t:>10.3f}s {pct:>6.1f}%')
+            for p, tp in parts.items():
+                if p.startswith(s + '_'):
+                    pct = 100 * tp / total if total > 0 else 0.0
+                    print(f'    {p:<18}{tp:>8.3f}s {pct:>6.1f}%')
         print(f'  {"total":<18}{total:>10.3f}s')
 
     def end_family(self, header, total):
@@ -116,6 +158,8 @@ class Profiler:
         self.report(header, total)
         for s, t in self.times.items():
             self.totals[s] += t
+        for p, t in self.parts.items():
+            self.part_totals[p] += t
         self.totals['_total'] += total
         self.reset()
 
@@ -123,4 +167,4 @@ class Profiler:
         if not self.enabled:
             return
         times = {s: t for s, t in self.totals.items() if s != '_total'}
-        self.report(header, self.totals['_total'], times=times)
+        self.report(header, self.totals['_total'], times=times, parts=self.part_totals)
