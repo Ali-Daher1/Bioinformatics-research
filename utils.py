@@ -65,7 +65,8 @@ def spawn_fasta(seqs, fasta_path, maxlen=None):
         SeqIO.write(records, output_handle, "fasta")
 
 # Stage profiling
-PROFILE_STAGES = ['guide_tree', 'medoid_selection', 'embedding', 'similarity', 'dp_fill', 'traceback', 'msa_assembly']
+PROFILE_STAGES = ['guide_tree', 'medoid_selection', 'embedding', 'similarity', 'dp_fill', 'traceback', 'score_copy',
+                  'msa_assembly']
 
 class Profiler:
     """Accumulates wall-clock time per stage. Disabled by default (no syncs, no timing).
@@ -102,17 +103,20 @@ class Profiler:
             self.times[name] += time.perf_counter() - t
 
     @contextmanager
-    def part(self, name):
-        """Wall-clock time of one part of a stage (synced like section)."""
+    def part(self, name, sync=True):
+        """Wall-clock time of one part of a stage (synced like section).
+        sync=False for work that already blocks (e.g. a copy from pageable CPU memory with the GPU idle)."""
         if not self.enabled:
             yield
             return
-        self.sync()
+        if sync:
+            self.sync()
         t = time.perf_counter()
         try:
             yield
         finally:
-            self.sync()
+            if sync:
+                self.sync()
             self.parts[name] += time.perf_counter() - t
 
     @contextmanager
@@ -149,6 +153,10 @@ class Profiler:
                 if p.startswith(s + '_'):
                     pct = 100 * tp / total if total > 0 else 0.0
                     print(f'    {p:<18}{tp:>8.3f}s {pct:>6.1f}%')
+        # all CPU<->GPU copies together; each is already counted in its stage above
+        transfers = times.get('score_copy', 0.0) + sum(t for p, t in parts.items() if p.endswith('_copy'))
+        pct = 100 * transfers / total if total > 0 else 0.0
+        print(f'  {"transfers":<18}{transfers:>10.3f}s {pct:>6.1f}%')
         print(f'  {"total":<18}{total:>10.3f}s')
 
     def end_family(self, header, total):

@@ -87,6 +87,9 @@ class WavefrontDP:
 
         device = e1.device if isinstance(e1, torch.Tensor) else None
         with self.profiler.section('similarity'):
+            # embeddings (on the CPU after the PLM) to the template's device, timed as a copy
+            with self.profiler.part('similarity_copy'):
+                e2 = [e.to(device) for e in e2] if self.batch else e2.to(device)
             if self.batch:
                 assert isinstance(e2, list) and isinstance(e1, torch.Tensor), "input 2 must be list, input 1 tensor"
                 M = [sim_metric(e1, e, w, reciprocal, blur, device=device) for e in e2]

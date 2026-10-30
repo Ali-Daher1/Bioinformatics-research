@@ -114,6 +114,12 @@ With `--profile`, the kernel modes also print sub-rows under `dp_fill` and `trac
 `*_kernel` is the GPU execution of the kernel only (CUDA events, no transfers), `dp_fill_prep` is padding
 and buffer setup on the GPU, `traceback_copy` is the GPU-to-CPU transfer of paths and scores, and
 `traceback_lists` is building the Python lists. Sub-rows are already counted in their stage.
+
+`--profile` also times every copy between CPU and GPU: `embedding_copy` (embeddings GPU to CPU, under
+`embedding`), `similarity_copy` (embeddings CPU to GPU, under `similarity`), `score_copy` (score matrices
+GPU to CPU after each batch, its own stage), `msa_assembly_copy` (scores back to the GPU, under
+`msa_assembly`) and `traceback_copy`. The `transfers` line is the sum of all of them; like the sub-rows,
+it is already counted in the stages above it.
 Add `--warmup 1` so one-time GPU start-up costs are not counted in the first alignment.
 
 ## CLI Reference

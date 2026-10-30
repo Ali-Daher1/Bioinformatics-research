@@ -42,6 +42,7 @@ class PLMWrapper(nn.Module):
                 raise ValueError(f'PLM model {plm} not supported.')
 
         self.hidden_size = self.plm.config.hidden_size
+        self.prof = Profiler()      # ARIES sets its own profiler here to time the copy to the CPU
         self.is_t5 = getattr(self.plm.config, "model_type", "") == "t5"
         self.plm.gradient_checkpointing_enable()
         if kwargs.get('freeze_backbone', True):
@@ -78,15 +79,17 @@ class PLMWrapper(nn.Module):
         retrieve_hs = kwargs.get('num_hidden_states', 1)
         if isinstance(retrieve_hs, list):
             # prottrans dont have CLS so we shave it away from esm embeddings (not required for alignment)
-            embeddings = [hs[i][:, 0 if self.is_t5 else 1:].to('cpu') for i in retrieve_hs]
-            embeddings = torch.cat(embeddings, dim=-1)
+            embeddings = [hs[i][:, 0 if self.is_t5 else 1:] for i in retrieve_hs]
         else:
             # prottrans dont have CLS so we shave it away from esm embeddings (not required for alignment)
             assert isinstance(retrieve_hs, int), 'num_hidden_states must be either list or int'
-            embeddings = [hs[i][:, 0 if self.is_t5 else 1:].to('cpu') for i in range(len(hs) - kwargs.get('num_hidden_states', 1), len(hs))]
-            embeddings = torch.cat(embeddings, dim=-1)
+            embeddings = [hs[i][:, 0 if self.is_t5 else 1:] for i in range(len(hs) - kwargs.get('num_hidden_states', 1), len(hs))]
+        embeddings = torch.cat(embeddings, dim=-1)
         # prottrans dont have CLS so we shave it away from esm embeddings (not required for alignment)
-        logits = outputs.logits[:, 0 if self.is_t5 else 1:].to('cpu')
+        logits = outputs.logits[:, 0 if self.is_t5 else 1:]
+        # one GPU -> CPU copy of the batch (concatenated on the PLM device first)
+        with self.prof.part('embedding_copy'):
+            embeddings, logits = embeddings.to('cpu'), logits.to('cpu')
         del outputs
         torch.cuda.empty_cache()
         return embeddings, logits

@@ -16,6 +16,8 @@ class ARIES:
         self.g = kwargs.get('blur', 3.)
         self.pad_char = kwargs.get('pad_char', 'X')
         self.prof = kwargs.get('profiler') or Profiler()
+        if hasattr(self.plm, 'prof'):
+            self.plm.prof = self.prof
         # device for similarity, DP fill, traceback and MSA assembly (the PLM has its own)
         self.align_device = torch.device(kwargs.get('align_device', 'cpu'))
 
@@ -89,9 +91,11 @@ class ARIES:
             print(f'>>>> Assigning columns')
         lefts, rights = [], []
         for i in range(len(seqs)):
-            S = pairwise_scores[i].to(self.align_device)
+            # the GPU is idle here (previous iteration ended with .tolist()) and both copies block: no extra syncs
+            with self.prof.part('msa_assembly_copy', sync=False):
+                S = pairwise_scores[i].to(self.align_device)
+                path = torch.tensor(paths[i], device=S.device)
             L = len(seqs[i])
-            path = torch.tensor(paths[i], device=S.device)
             on_path = torch.zeros_like(S, dtype=torch.bool)
             on_path[path[:, 0], path[:, 1]] = True
             # each residue keeps its best-scoring template position on the path
@@ -215,7 +219,8 @@ class ARIES:
             )
             all_paths.extend(paths)
             # keep finished score matrices off the GPU; large families would not fit
-            all_scores.extend(s.cpu() for s in scores)
+            with self.prof.section('score_copy'):
+                all_scores.extend(s.cpu() for s in scores)
 
         alns = self.build_msa(None, seqs, consensus_emb, paths=all_paths, pairwise_scores=all_scores)
         aln_time = time.time() - t
