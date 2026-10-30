@@ -31,7 +31,9 @@ class ARIES:
 
         aligner_tokens = kwargs.get('aligner', 'aries').split('-')
         dtw = kwargs.get('dtw', 'torch')
-        if aligner_tokens[0] == 'aries' and dtw != 'torch':
+        # kernel modes: DTW and the column assignment of MSA assembly run as CUDA kernels (dtw_kernels.py)
+        self.gpu_assign = aligner_tokens[0] == 'aries' and dtw != 'torch'
+        if self.gpu_assign:
             from dtw_kernels import CudaKernelDTW, KERNELS  # needs CuPy; imported only when chosen
             self.aligner = CudaKernelDTW(batch=True, profiler=self.prof, fill=KERNELS[dtw])
         elif aligner_tokens[0] == 'aries':
@@ -48,6 +50,7 @@ class ARIES:
         return embeddings
 
     def build_msa(self, embeddings, seqs, consensus_embedding, verbose=True, paths=None, pairwise_scores=None):
+        # kernel modes: `paths` holds the column assignment from the GPU, (best_t, anchor_j) per sequence
         template_length = consensus_embedding.shape[0] - 2 * self.w
         if paths is None:
             if verbose:
@@ -57,16 +60,20 @@ class ARIES:
                 w=self.w, reciprocal=self.r, blur=self.g,
                 return_scores=True, sim_metric=self.sim_metric
             )
+            if not self.gpu_assign:
+                with self.prof.section('score_copy'):
+                    pairwise_scores = [s.cpu() for s in pairwise_scores]
         with self.prof.section('msa_assembly'):
+            if self.gpu_assign:
+                with self.prof.part('msa_assembly_strings'):
+                    return self.center_columns(self.columns_from_assignment(seqs, template_length, paths, verbose=verbose), len(seqs), verbose=verbose)
             return self.assemble_columns(seqs, template_length, paths, pairwise_scores, verbose=verbose)
 
     def assemble_columns(self, seqs, template_length, paths, pairwise_scores, verbose=True):
-        num_seqs = len(seqs)
-        if self.align_device.type == 'cpu':
-            cols = self.infer_columns_loop(seqs, template_length, paths, pairwise_scores, verbose=verbose)
-        else:
-            cols = self.infer_columns_vectorized(seqs, template_length, paths, pairwise_scores, verbose=verbose)
+        cols = self.infer_columns_loop(seqs, template_length, paths, pairwise_scores, verbose=verbose)
+        return self.center_columns(cols, len(seqs), verbose=verbose)
 
+    def center_columns(self, cols, num_seqs, verbose=True):
         if verbose:
             print(f'>>>> Centering columns')
         for t, (col_left, col_right) in enumerate(cols):
@@ -85,26 +92,13 @@ class ARIES:
         del cols
         return alns
 
-    def infer_columns_vectorized(self, seqs, template_length, paths, pairwise_scores, verbose=True):
-        # Same result as infer_columns_loop, but each step is one masked argmax on align_device
+    def columns_from_assignment(self, seqs, template_length, assignments, verbose=True):
+        # Same columns as infer_columns_loop, from the GPU column assignment (dtw_kernels.assign_columns_cuda):
+        # residue j goes to template position best_t[j], left of its anchor if j <= anchor_j[best_t[j]]
         if verbose:
-            print(f'>>>> Assigning columns')
+            print(f'>>>> Inferring anchors')
         lefts, rights = [], []
-        for i in range(len(seqs)):
-            # the GPU is idle here (previous iteration ended with .tolist()) and both copies block: no extra syncs
-            with self.prof.part('msa_assembly_copy', sync=False):
-                S = pairwise_scores[i].to(self.align_device)
-                path = torch.tensor(paths[i], device=S.device)
-            L = len(seqs[i])
-            on_path = torch.zeros_like(S, dtype=torch.bool)
-            on_path[path[:, 0], path[:, 1]] = True
-            # each residue keeps its best-scoring template position on the path
-            best_t = S.masked_fill(~on_path, -float('inf')).argmax(dim=0)
-            assigned = torch.zeros_like(on_path)
-            assigned[best_t, torch.arange(L, device=S.device)] = True
-            # anchor = best-scoring residue among those assigned to each template position
-            anchor_j = S.masked_fill(~assigned, -float('inf')).argmax(dim=1)
-            best_t, anchor_j = best_t.tolist(), anchor_j.tolist()
+        for i, (best_t, anchor_j) in enumerate(assignments):
             left, right = defaultdict(str), defaultdict(str)
             for j, t in enumerate(best_t):
                 if j <= anchor_j[t]:
@@ -113,9 +107,6 @@ class ARIES:
                     right[t] += seqs[i][j]
             lefts.append(left)
             rights.append(right)
-
-        if verbose:
-            print(f'>>>> Inferring anchors')
         cols = []
         for t in range(template_length):
             col_left = [left.get(t, '') for left in lefts]
@@ -218,9 +209,11 @@ class ARIES:
                 return_scores=True, sim_metric=self.sim_metric,
             )
             all_paths.extend(paths)
-            # keep finished score matrices off the GPU; large families would not fit
-            with self.prof.section('score_copy'):
-                all_scores.extend(s.cpu() for s in scores)
+            if not self.gpu_assign:
+                # keep finished score matrices off the GPU; large families would not fit
+                with self.prof.section('score_copy'):
+                    all_scores.extend(s.cpu() for s in scores)
+            del scores
 
         alns = self.build_msa(None, seqs, consensus_emb, paths=all_paths, pairwise_scores=all_scores)
         aln_time = time.time() - t

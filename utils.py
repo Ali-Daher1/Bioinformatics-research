@@ -148,16 +148,16 @@ class Profiler:
         for s in stages + ['other']:
             t = other if s == 'other' else times.get(s, 0.0)
             pct = 100 * t / total if total > 0 else 0.0
-            print(f'  {s:<18}{t:>10.3f}s {pct:>6.1f}%')
+            print(f'  {s:<20}{t:>10.3f}s {pct:>6.1f}%')
             for p, tp in parts.items():
                 if p.startswith(s + '_'):
                     pct = 100 * tp / total if total > 0 else 0.0
-                    print(f'    {p:<18}{tp:>8.3f}s {pct:>6.1f}%')
+                    print(f'    {p:<20}{tp:>8.3f}s {pct:>6.1f}%')
         # all CPU<->GPU copies together; each is already counted in its stage above
         transfers = times.get('score_copy', 0.0) + sum(t for p, t in parts.items() if p.endswith('_copy'))
         pct = 100 * transfers / total if total > 0 else 0.0
-        print(f'  {"transfers":<18}{transfers:>10.3f}s {pct:>6.1f}%')
-        print(f'  {"total":<18}{total:>10.3f}s')
+        print(f'  {"transfers":<20}{transfers:>10.3f}s {pct:>6.1f}%')
+        print(f'  {"total":<20}{total:>10.3f}s')
 
     def end_family(self, header, total):
         """Print this family's breakdown and add it to the run totals."""

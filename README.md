@@ -102,24 +102,29 @@ aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --devic
 ```
 Combine with `--profile` to compare per-stage times between `--align-device cpu` and `cuda`.
 
-`--align-device kernel0` and `kernel1` are `cuda` with the DP fill and traceback replaced by custom CUDA
-kernels (`dtw_kernels.py`, compiled at run time with CuPy); similarity and MSA assembly use the same GPU
-code as `cuda`, and the alignments are identical. `kernel1` keeps only the three active anti-diagonals of
-the DP table in shared memory (template length up to 4095). Both need an NVIDIA GPU and CuPy:
+With `--align-device cuda`, MSA assembly is the original ARIES code on the CPU (the score matrices are
+copied back to the CPU after each batch).
+
+`--align-device kernel0` and `kernel1` are `cuda` with custom CUDA kernels (`dtw_kernels.py`, compiled at
+run time with CuPy) for the DP fill, the traceback and the column assignment of MSA assembly; similarity
+uses the same GPU code as `cuda`. The paths and score matrices stay on the GPU from DTW to the column
+assignment; only the assignment (two integers per residue) is copied to the CPU, where the aligned text is
+built. The alignments are identical to `cpu` and `cuda`. `kernel1` keeps only the three active
+anti-diagonals of the DP table in shared memory (template length up to 4095). Both need an NVIDIA GPU and
+CuPy:
 ```
 pip install cupy-cuda12x
 aries --input ./datasets/HOMSTRAD/inputs --output-dir ./outputs/HOMSTRAD --device cuda --align-device kernel0
 ```
-With `--profile`, the kernel modes also print sub-rows under `dp_fill` and `traceback`:
-`*_kernel` is the GPU execution of the kernel only (CUDA events, no transfers), `dp_fill_prep` is padding
-and buffer setup on the GPU, `traceback_copy` is the GPU-to-CPU transfer of paths and scores, and
-`traceback_lists` is building the Python lists. Sub-rows are already counted in their stage.
+With `--profile`, the kernel modes also print sub-rows: `*_kernel` is the GPU execution of a kernel only
+(CUDA events, no transfers), `dp_fill_prep` / `msa_assembly_prep` are padding and buffer setup on the GPU,
+`msa_assembly_copy` is the GPU-to-CPU transfer of the column assignment, and `msa_assembly_strings` is
+building the aligned text on the CPU. Sub-rows are already counted in their stage.
 
 `--profile` also times every copy between CPU and GPU: `embedding_copy` (embeddings GPU to CPU, under
 `embedding`), `similarity_copy` (embeddings CPU to GPU, under `similarity`), `score_copy` (score matrices
-GPU to CPU after each batch, its own stage), `msa_assembly_copy` (scores back to the GPU, under
-`msa_assembly`) and `traceback_copy`. The `transfers` line is the sum of all of them; like the sub-rows,
-it is already counted in the stages above it.
+GPU to CPU, its own stage; `cpu` and `cuda` only) and `msa_assembly_copy` (kernel modes). The `transfers`
+line is the sum of all of them; like the sub-rows, it is already counted in the stages above it.
 Add `--warmup 1` so one-time GPU start-up costs are not counted in the first alignment.
 
 ## CLI Reference
